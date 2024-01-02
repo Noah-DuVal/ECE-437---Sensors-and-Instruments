@@ -1,0 +1,655 @@
+JTEG_test_file.v:
+`timescale 1ns / 1ps
+
+module JTEG_Test_File(   
+    output [7:0] led,
+    input sys_clkn,
+    input sys_clkp,
+    input CVM300_SPI_OUT,
+    output CVM300_SYS_RES_N,
+    output CVM300_SPI_EN,
+    output CVM300_SPI_IN,
+    output CVM300_SPI_CLK,
+    input  [4:0] okUH,
+    output [2:0] okHU,
+    inout  [31:0] okUHU,
+    inout  okAA      
+);
+    
+    wire ila_clk, fsm_clk,read_done, write_done;
+    wire [23:0] clk_div_thresh;
+    assign clk_div_thresh = 24'd400;
+    //wires needed to implement frontpanel
+    wire [31:0] data_in, addr_in, r_w, start_fsm;
+    wire [7:0]  data_out, State;
+    
+    //needed for the clocking of the system
+    ClockGenerator sys_clk_div (.sys_clkn(sys_clkn), .sys_clkp(sys_clkp), .ClkDivThreshold(clk_div_thresh), .FSM_Clk(fsm_clk), .ILA_Clk(ila_clk));   
+
+    //Instantiate the module that we like to test
+    SPI_master SPI_mod (.FSM_clk(fsm_clk), .ADDR(addr_in[7:0]),
+                        .D_IN(data_in[7:0]), .MISO_IN(CVM300_SPI_OUT), .R_W(r_w[0]),
+                        .START_FSM(start_fsm[0]), .SPI_CLK_OUT(CVM300_SPI_CLK),
+                        .MOSI_OUT(CVM300_SPI_IN), .D_OUT(data_out),
+                        .SPI_EN(CVM300_SPI_EN), .READ_DONE(read_done), 
+                        .WRITE_DONE(write_done),.STATE(State));
+    
+    //Instantiate the ILA module
+    ila_0 ila_sample12 ( 
+        .clk(ila_clk),
+        .probe0({State[7:0], CVM300_SPI_OUT, CVM300_SPI_IN, CVM300_SPI_EN, CVM300_SPI_CLK}),                             
+        .probe1({fsm_clk, start_fsm[0]})
+        );
+    
+    //Front Panel Stuff
+    wire okClk;            //These are FrontPanel wires needed to IO communication    
+    wire [112:0]    okHE;  //These are FrontPanel wires needed to IO communication    
+    wire [64:0]     okEH;  //These are FrontPanel wires needed to IO communication
+    
+    //control words for the FSM
+    okWireIn wire10 (   .okHE(okHE), 
+                        .ep_addr(8'h00), 
+                        .ep_dataout(data_in));
+                        
+    okWireIn wire11 (   .okHE(okHE), 
+                        .ep_addr(8'h01), 
+                        .ep_dataout(addr_in));
+                        
+    okWireIn wire12 (   .okHE(okHE), 
+                        .ep_addr(8'h02), 
+                        .ep_dataout(r_w));
+                        
+    okWireIn wire13 (   .okHE(okHE), 
+                        .ep_addr(8'h03), 
+                        .ep_dataout(start_fsm));  
+                        
+                    
+    //This is the OK host that allows data to be sent or recived    
+    okHost hostIF (
+        .okUH(okUH),
+        .okHU(okHU),
+        .okUHU(okUHU),
+        .okClk(okClk),
+        .okAA(okAA),
+        .okHE(okHE),
+        .okEH(okEH)
+    );
+    //Depending on the number of outgoing endpoints, adjust endPt_count accordingly.
+    //In this example, we have 2 output endpoints, hence endPt_count = 2.
+    localparam  endPt_count = 2;
+    wire [endPt_count*65-1:0] okEHx;  
+    okWireOR # (.N(endPt_count)) wireOR (okEH, okEHx);
+    
+    //stuff recieved from the FSM
+    okWireOut wire20 (  .okHE(okHE), 
+                        .okEH(okEHx[ 0*65 +: 65 ]),
+                        .ep_addr(8'h20), 
+                        .ep_datain({24'd0,data_out}));
+    okWireOut wire21 (  .okHE(okHE), 
+                        .okEH(okEHx[ 1*65 +: 65 ]),
+                        .ep_addr(8'h21), 
+                        .ep_datain({30'd0,read_done,write_done}));  
+                        
+endmodule
+
+
+
+SPI_master.v:
+//This program is a SPI module for performing the operations using the SPI control interface on the camera
+module SPI_master(input wire FSM_clk,
+                  input wire [6:0] ADDR,
+                  input wire [7:0] D_IN,
+                  input wire MISO_IN,
+                  input wire R_W,
+                  input wire START_FSM,
+                  output wire SPI_CLK_OUT,
+                  output wire MOSI_OUT,
+                  output reg [7:0] D_OUT,
+                  output reg SPI_EN,
+                  output reg READ_DONE,
+                  output reg WRITE_DONE,
+                  output reg [7:0] STATE);
+//define some registers
+reg CLK, MOSI;
+assign MOSI_OUT = MOSI;
+assign SPI_CLK_OUT = CLK;
+
+//define a local param
+localparam STATE_INIT = 8'd0;
+//define some initial values
+initial begin
+    CLK = 1'b0;
+    MOSI = 1'b0;
+    SPI_EN = 1'b0;
+    STATE = 8'd0;
+    READ_DONE = 1'b1;
+    WRITE_DONE =1'b1;
+    D_OUT = 8'd0;
+end
+always @(posedge FSM_clk) begin
+    case (STATE) 
+        STATE_INIT : begin
+            if (START_FSM == 1'b1) STATE <= 8'd1;
+
+            else if (START_FSM == 1'b0) begin
+                STATE <= STATE_INIT;
+                SPI_EN <= 1'b0;
+                CLK <= 1'b0;
+                WRITE_DONE <= 1'b0;
+                READ_DONE <= 1'b0;
+            end
+        end
+        //begin start sequence
+        8'd1 : begin
+            WRITE_DONE <= 1'b0;
+            READ_DONE <= 1'b0;
+            SPI_EN <= 1'b1;
+            CLK <= 1'b0;
+            MOSI <= R_W;
+            STATE <= STATE + 1'b1;
+        end
+        //define if register addr is to read or write
+        8'd2 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd3 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd4 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        //transmit ADDR[6]
+        8'd5 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[6];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd6 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd7 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd8 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        //transmit ADDR[5]
+        8'd9 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[5];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd10 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd11 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd12 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        //transmit ADDR[4]
+        8'd13 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[4];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd14 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd15 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd16 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        //transmit ADDR[3]
+        8'd17 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[3];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd18 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd19 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd20 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //transmit ADDR[2]
+        8'd21 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[2];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd22 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd23 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd24 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //transmit ADDR[1]
+        8'd25 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[1];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd26 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd27 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd28 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //transmit ADDR[0]
+        8'd29 : begin
+            CLK <= 1'b0;
+            MOSI <= ADDR[0];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd30 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd31 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd32 : begin
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //begin to decide it is a read or write
+        //data should be read on the falling edge, data should be sent on the rising edge
+        //send data in [7]
+        8'd33 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[7];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd34 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [7]
+        8'd35 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[7] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd36 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //send data in [6]
+        8'd37 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[6];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd38 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [6]
+        8'd39 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[6] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd40 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        
+        //send data in [5]
+        8'd41 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[5];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd42 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [5]
+        8'd43 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[5] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd44 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //send data in [4]
+        8'd45 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[4];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd46 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [4]
+        8'd47 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[4] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd48 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //send data in [3]
+        8'd49 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[3];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd50 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [3]
+        8'd51 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[3] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd52 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //send data in [2]
+        8'd53 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[2];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd54 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [2]
+        8'd55 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[2] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd56 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+
+        //send data in [1]
+        8'd57 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) MOSI <= D_IN[1];
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd58 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [1]
+        8'd59 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) D_OUT[1] <= MISO_IN;
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd60 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        
+        //send data in [0]
+        8'd61 : begin
+            CLK <= 1'b0;
+            if (R_W == 1'b1) begin
+                MOSI <= D_IN[0];
+                WRITE_DONE <= 1'b1;
+            end
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd62 : begin
+            CLK <= 1'b0;
+            STATE <= STATE + 1'b1;
+        end
+        //recieve data in [0]
+        8'd63 : begin
+            CLK <= 1'b1;
+            if (R_W == 1'b0) begin
+                D_OUT[0] <= MISO_IN;
+                READ_DONE <= 1'b1;
+            end
+            STATE <= STATE + 1'b1;
+        end
+
+        8'd64 : begin 
+            CLK <= 1'b1;
+            STATE <= STATE + 1'b1;
+        end
+        default : STATE <= STATE_INIT;
+    endcase
+end
+endmodule
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# -*- coding: utf-8 -*-
+#%%
+# import various libraries necessary to run your Python code
+import time # time related library
+import sys,os # system related library
+ok_sdk_loc = "C:\\Program Files\\Opal Kelly\\FrontPanelUSB\\API\\Python\\x64"
+ok_dll_loc = "C:\\Program Files\\Opal Kelly\\FrontPanelUSB\\API\\lib\\x64"
+sys.path.append(ok_sdk_loc) # add the path of the OK library
+os.add_dll_directory(ok_dll_loc)
+import numpy as np
+import ok # OpalKelly library
+#%%
+# Define FrontPanel device variable, open USB communication and
+# load the bit file in the FPGA
+dev = ok.okCFrontPanel() # define a device for FrontPanel communication
+SerialStatus=dev.OpenBySerial("") # open USB communication with the OK board
+# We will NOT load the bit file because it will be loaded using JTAG interface from
+#   Vivado
+# Check if FrontPanel is initialized correctly and if the bit file is loaded.
+# Otherwise terminate the program
+print("----------------------------------------------------")
+if SerialStatus == 0:
+    print ("FrontPanel host interface was successfully initialized.")
+else:
+    print ("FrontPanel host interface not detected. The error code number is:" +
+    str(int(SerialStatus)))
+    print("Exiting the program.")
+    sys.exit ()
+
+print("----------------------------------------------------")
+print("----------------------------------------------------")
+
+#%% 
+
+
+data = 0x00;
+addr = 0x01;
+r_w = 0x02;
+start = 0x03;
+read_data = 0x20;
+
+#---------------- Start of sending the default value to the Default Registers ---------------------#
+
+dev.UpdateWireOuts()
+Default_Addr = [1,2,3,4,39,42,43,44,57,58,59,60,68,69,80,83,97,98,100,101,102,103,106,107,108,109,110,117]
+Default_Values = [232,1,52,93,1,232,5,0,3,44,240,10,2,9,2,187,240,10,112,98,34,64,94,110,91,82,80,91]
+    
+#----------------- Writes all of the default values -----------------#
+
+for i in range(len(Default_Addr)):
+
+    TEMP_addr = Default_Addr[i]
+    dev.SetWireInValue(addr, TEMP_addr)
+    dev.SetWireInValue(r_w, 1)                   #------- Sends Address and Value for Address ------#
+    TEMP_VALUE = Default_Values[i]
+    dev.SetWireInValue(data, TEMP_VALUE)
+    dev.UpdateWireIns()
+    
+    time.sleep(.1)
+    
+    dev.SetWireInValue(start, 1)
+    dev.UpdateWireIns()
+    dev.SetWireInValue(start, 0) #------ Starts the FSM -----------#
+    dev.UpdateWireIns()
+    time.sleep(.1)
+        
+    print(str(TEMP_VALUE) + ' Written To: ' + str(TEMP_addr))
+    time.sleep(.1)
+    
+    
+    #------------ Reads all of the default values -------------#
+    
+print('Write Completed')
+  
+
+for i in range(len(Default_Addr)):
+
+
+    
+    TEMP_addr = Default_Addr[i]
+    dev.SetWireInValue(addr, TEMP_addr)
+    dev.SetWireInValue(r_w, 0)
+    dev.UpdateWireIns()                         #---------- Reads Register Values ------------#
+    time.sleep(.1)
+    dev.SetWireInValue(start, 1)
+    dev.UpdateWireIns()
+    dev.SetWireInValue(start, 0)
+    dev.UpdateWireIns()
+    time.sleep(.1)
+    
+    
+    dev.UpdateWireOuts()
+    TEMP_VALUE = dev.GetWireOutValue(read_data)
+    print('Register ' + str(TEMP_addr) + ' value: ' + str(TEMP_VALUE))
+    time.sleep(0.1)
+
+print('Done reading from registers!')
+ 
+
+print('Reading all registers')
+for i in range(127):
+
+
+    
+    TEMP_addr = i
+    dev.SetWireInValue(addr, TEMP_addr)
+    dev.SetWireInValue(r_w, 0)
+    dev.UpdateWireIns()                         #---------- Reads Register Values ------------#
+    time.sleep(.1)
+    dev.SetWireInValue(start, 1)
+    dev.UpdateWireIns()
+    dev.SetWireInValue(start, 0)
+    dev.UpdateWireIns()
+    time.sleep(.1)
+    
+    
+    dev.UpdateWireOuts()
+    TEMP_VALUE = dev.GetWireOutValue(read_data)
+    print('Register ' + str(TEMP_addr) + ' value: ' + str(TEMP_VALUE))
+    time.sleep(.1)
+
+print('Done reading from registers!')
+dev.Close

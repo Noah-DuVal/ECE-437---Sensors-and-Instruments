@@ -1,0 +1,856 @@
+ `timescale 1ns / 1ps
+
+module I2C_Transmit(    
+    input  sys_clkn,
+    input  sys_clkp,
+    output ADT7420_A0,
+    output ADT7420_A1,
+    output I2C_SCL_1,
+    inout  I2C_SDA_1,        
+    output reg FSM_Clk_reg,    
+    output reg ILA_Clk_reg,
+    output reg ACK_bit,
+    output reg SCL,
+    output reg SDA,
+    output reg [9:0] State,
+    output wire [31:0] PC_control,
+    input  wire    [4:0] okUH,
+    output wire    [2:0] okHU,
+    inout  wire    [31:0] okUHU,
+    output    wire [31:0] DeviceAd,
+    output wire [31:0] SubAd,   
+    output wire [31:0] DataW,   
+    output wire [31:0] DutyCyc, 
+    output wire [31:0] MotorD, 
+    output wire [31:0] Pulses, 
+    output PMOD_A1,     
+    output PMOD_A2,
+    output wire Direction,
+    output wire Step,
+    output wire [3:0] MState,
+    output wire slow_clk,
+    output wire [31:0] counter,
+    inout wire okAA,
+    output wire topclk, okClk,
+    output wire FIFO_read_enable, 
+    input wire FIFO_BT_BlockSize_Full,
+    output wire [31:0] variable_1, variable_2, variable_3, python_start, Reset_Counter,
+    input wire [31:0] result_wire, variable_4, FIFO_data    
+
+    
+    );
+    
+    //Instantiate the ClockGenerator module, where three signals are generate:
+    //High speed CLK signal, Low speed FSM_Clk signal     
+    wire [23:0] ClkDivThreshold = 10;   
+    wire FSM_Clk, ILA_Clk; 
+    wire clk1, BT_Strobe;
+    assign topclk = clk1;
+    ClockGenerator ClockGenerator1 (  .sys_clkn(sys_clkn),
+                                      .sys_clkp(sys_clkp),                                      
+                                      .ClkDivThreshold(ClkDivThreshold),
+                                      .FSM_Clk(FSM_Clk),         
+                                      .clk1(clk1),                             
+                                      .ILA_Clk(ILA_Clk) );
+                                      
+   MotorControl MotorCont ( .clkp(clk1),
+                            .MotorD(MotorD),
+                            .Pulses(Pulses), 
+                            .DutyCyc(DutyCyc),
+                            .PMOD_A1(PMOD_A1),
+                            .PMOD_A2(PMOD_A2),
+                            .Direction(Direction),
+                            .Step(Step),
+                            .counter(counter),
+                            .State(MState),
+                            .slow_clk(slow_clk)
+                              );
+                                        
+//    wire [31:0] DeviceAd;
+//    wire [31:0] SubAd;   
+//    wire [31:0] DataW;
+    reg [7:0] Counter;
+    reg [7:0] nstate;
+    reg error_bit = 1'b1;   
+    reg [7:0] SDAin;
+    reg RWflag;
+    parameter start = 8'd1;
+    parameter stop = 8'd8;
+    parameter stopp = 8'd88;
+    parameter rstart = 8'd3;
+    parameter sack = 8'd12;
+    parameter mack = 8'd16;
+    parameter nack = 8'd20;
+    parameter transmit = 8'd24;
+    parameter recieve = 8'd56;
+    reg [7:0] read1, read2, read3, read4, read5, read6;
+    reg [7:0] SDAout;
+    wire [15:0] out1, out2, out3;
+    wire clkp;
+    assign out1 = {read1, read2};
+    assign out2 = {read3, read4};
+    assign out3 = {read5, read6};        
+       
+    localparam STATE_INIT       = 10'd0;    
+//    assign led[7] = ACK_bit;
+//    assign led[6] = error_bit;
+    assign ADT7420_A0 = 1'b0;
+    assign ADT7420_A1 = 1'b0;
+    assign I2C_SCL_1 = SCL;
+    assign I2C_SDA_1 = SDA; 
+    assign clkp = sys_clkp;
+    initial  begin
+        SCL = 1'b1;
+        SDA = 1'b1;
+        ACK_bit = 1'b1;  
+        State = 10'd0; 
+        RWflag = 1'b0;
+        SDAin = 8'd0;
+        
+    end
+    
+    always @(*) begin          
+        FSM_Clk_reg = FSM_Clk;
+        ILA_Clk_reg = ILA_Clk;   
+
+    end   
+    
+    always @(*) begin
+                //SDA transmit logic
+        SDAin = 1'bz;
+        case (Counter) 
+            8'd0 : begin
+                nstate = transmit;
+                SDAin = {DeviceAd[7:1], 1'b0};
+            end
+            
+            8'd1 : begin
+                nstate = sack;
+                SDAin = {DeviceAd[7:1], 1'b0}; 
+            end
+            
+            8'd2 : begin
+                nstate = transmit;
+                SDAin = SubAd;
+            end
+            
+            8'd3 : begin
+                nstate = sack;
+                SDAin = SubAd;
+            end
+            
+            8'd4 : begin
+                if (SubAd[7] == 1'b0) begin 
+                    nstate = transmit;
+                end 
+                else begin
+                    nstate = rstart;
+                    SDAin = DataW;
+                end
+            end
+            
+            8'd5 : begin
+                if (SubAd[7] == 1'b0) begin 
+                    nstate = sack;
+                    SDAin = DataW;
+                end 
+                else begin
+                    nstate = transmit;
+                    SDAin = {DeviceAd[7:1], 1'b1};
+                end
+            end
+            
+            8'd6 : begin
+                if (SubAd[7] == 1'b0) begin 
+                    nstate = stop;
+                end 
+                else begin
+                    nstate = sack;
+                    SDAin = {DeviceAd[7:1], 1'b1};
+                end
+            end
+            
+            8'd7 : begin
+                nstate = recieve;
+            end
+            
+            8'd8 : begin
+                nstate = mack;
+            end
+            
+            8'd9 : begin
+                nstate = recieve;
+            end
+            
+            8'd10 : begin
+                nstate = mack;
+            end
+            
+            8'd11 : begin
+                nstate = recieve;
+            end
+            
+            8'd12 : begin
+                nstate = mack;
+            end
+            
+            8'd13 : begin
+                nstate = recieve;    
+            end
+            
+            8'd14 : begin
+                nstate = mack;
+            end
+            
+            8'd15 : begin
+                nstate = recieve;
+            end
+            
+            8'd16 : begin
+                nstate = mack;
+            end
+            
+            8'd17 : begin
+                nstate = recieve;
+            end
+            
+            8'd18 : begin
+                nstate = nack;
+                
+            end
+            
+            8'd19 : begin
+                nstate = stop;
+            end
+            
+            default : begin 
+                nstate = stop;
+                SDAin = 8'b11111111;
+            end
+            
+        endcase
+    end
+    
+                               
+    always @(posedge FSM_Clk) begin                       
+        case (State)
+            // Press Button[3] to start the state machine. Otherwise, stay in the STATE_INIT state        
+            STATE_INIT : begin
+                 if (PC_control[0] == 1'b1) State <= 10'd1;                    //PC_control[0] == 1'b1
+                 else begin                 
+                      SCL <= 1'b1;
+                      SDA <= 1'b1;
+                      State <= 10'd0;
+                  end
+            end            
+            
+            // This is the Start sequence            0
+
+            10'd1 : begin       //start 
+                Counter <= 8'd0;
+                SCL <= 1'b1; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd2 : begin       //start 
+                SCL <= 1'b0; 
+                SDA <= 1'b0;
+                Counter <= Counter + 1'b1;
+                State <= nstate; 
+            end
+
+            10'd3 : begin       //repeat start 
+                SCL <= 1'b0; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd4 : begin       //repeat start 
+                SCL <= 1'b0; 
+                SDA <= 1'b1;
+                State <= State + 1'b1; 
+            end
+
+            10'd5 : begin       //repeat start 
+                SCL <= 1'b1; 
+                SDA <= 1'b1;
+                State <= State + 1'b1; 
+            end
+
+            10'd6 : begin       //repeat start 
+                SCL <= 1'b1; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd7 : begin       //repeat start 
+                SCL <= 1'b0; 
+                SDA <= 1'b0;
+                Counter <= Counter + 1'b1;
+                State <= nstate;  
+            end
+
+            10'd8 : begin       //stop 
+                SCL <= 1'b0; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd9 : begin       //stop 
+                SCL <= 1'b1; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd10 : begin       //stop 
+                SCL <= 1'b1; 
+                SDA <= 1'b1;
+                State <= State + 1'b1; 
+            end
+
+            10'd11 : begin       //stop 
+                SCL <= 1'b1; 
+                SDA <= 1'b1;
+                State <= stopp;  
+            end
+
+            10'd12 : begin       //slave acknowledge 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd13 : begin       //slave acknowledge 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd14 : begin       //slave acknowledge 
+                SCL <= 1'b1; 
+                ACK_bit <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd15 : begin       //slave acknowledge 
+                SCL <= 1'b0; 
+                Counter <= Counter + 1'b1;
+                State <= nstate;  
+            end
+
+            10'd16 : begin       //master acknowledge 
+                SCL <= 1'b0; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd17 : begin       //master acknowledge 
+                SCL <= 1'b1; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd18 : begin       //master acknowledge 
+                SCL <= 1'b1; 
+                SDA <= 1'b0;
+                State <= State + 1'b1; 
+            end
+
+            10'd19 : begin       //master acknowledge 
+                SCL <= 1'b0; 
+                SDA <= 1'b0;
+                Counter <= Counter + 1'b1;
+                State <= nstate; 
+            end
+
+            10'd20 : begin       //master no acknowledge 
+                SCL <= 1'b0; 
+                SDA <= 1'b1;
+                State <= State + 1'b1; 
+            end
+
+            10'd21 : begin       //master no acknowledge 
+                SCL <= 1'b1; 
+                SDA <= 1'b1;
+                State <= State + 1'b1; 
+            end
+
+            10'd22 : begin       //master no acknowledge 
+                SCL <= 1'b1; 
+                SDA <= 1'b1;
+                State <= State + 1'b1; 
+            end
+
+            10'd23 : begin       //master no acknowledge 
+                SCL <= 1'b0; 
+                SDA <= 1'b1;
+                Counter <= Counter + 1'b1;
+                State <= nstate; 
+            end
+
+            10'd24 : begin       //transmit bit 7 
+                SCL <= 1'b0; 
+                SDA <= SDAin[7];
+                State <= State + 1'b1; 
+            end
+
+            10'd25 : begin       //transmit bit 7 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd26 : begin       //transmit bit 7 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd27 : begin       //transmit bit 7 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd28 : begin       //transmit bit 6 
+                SCL <= 1'b0; 
+                SDA <= SDAin[6];
+                State <= State + 1'b1; 
+            end
+
+            10'd29 : begin       //transmit bit 6 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd30 : begin       //transmit bit 6 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd31 : begin       //transmit bit 6 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd32 : begin       //transmit bit 5 
+                SCL <= 1'b0; 
+                SDA <= SDAin[5];
+                State <= State + 1'b1; 
+            end
+
+            10'd33 : begin       //transmit bit 5 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd34 : begin       //transmit bit 5 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd35 : begin       //transmit bit 5 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd36 : begin       //transmit bit 4 
+                SCL <= 1'b0; 
+                SDA <= SDAin[4];
+                State <= State + 1'b1; 
+            end
+
+            10'd37 : begin       //transmit bit 4 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd38 : begin       //transmit bit 4 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd39 : begin       //transmit bit 4 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd40 : begin       //transmit bit 3 
+                SCL <= 1'b0; 
+                SDA <= SDAin[3];
+                State <= State + 1'b1; 
+            end
+
+            10'd41 : begin       //transmit bit 3 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd42 : begin       //transmit bit 3 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd43 : begin       //transmit bit 3 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd44 : begin       //transmit bit 2 
+                SCL <= 1'b0; 
+                SDA <= SDAin[2];
+                State <= State + 1'b1; 
+            end
+
+            10'd45 : begin       //transmit bit 2 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd46 : begin       //transmit bit 2 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd47 : begin       //transmit bit 2 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd48 : begin       //transmit bit 1 
+                SCL <= 1'b0; 
+                SDA <= SDAin[1];
+                State <= State + 1'b1; 
+            end
+
+            10'd49 : begin       //transmit bit 1 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd50 : begin       //transmit bit 1 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd51 : begin       //transmit bit 1 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd52 : begin       //transmit bit 0 
+                SCL <= 1'b0; 
+                SDA <= SDAin[0];
+                State <= State + 1'b1; 
+            end
+
+            10'd53 : begin       //transmit bit 0 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd54 : begin       //transmit bit 0 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd55 : begin       //transmit bit 0 
+                SCL <= 1'b0; 
+                Counter <= Counter + 1'b1;
+                State <= nstate;  
+            end
+
+            10'd56 : begin       //recieve bit 7 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd57 : begin       //recieve bit 7 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd58 : begin       //recieve bit 7 
+                SCL <= 1'b1; 
+                SDAout[7] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd59 : begin       //recieve bit 7 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd60 : begin       //recieve bit 6 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd61 : begin       //recieve bit 6 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd62 : begin       //recieve bit 6 
+                SCL <= 1'b1; 
+                SDAout[6] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd63 : begin       //recieve bit 6 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd64 : begin       //recieve bit 5 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd65 : begin       //recieve bit 5 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd66 : begin       //recieve bit 5 
+                SCL <= 1'b1; 
+                SDAout[5] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd67 : begin       //recieve bit 5 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd68 : begin       //recieve bit 4 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd69 : begin       //recieve bit 4 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd70 : begin       //recieve bit 4 
+                SCL <= 1'b1; 
+                SDAout[4] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd71 : begin       //recieve bit 4 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd72 : begin       //recieve bit 3 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd73 : begin       //recieve bit 3 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd74 : begin       //recieve bit 3 
+                SCL <= 1'b1; 
+                SDAout[3] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd75 : begin       //recieve bit 3 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd76 : begin       //recieve bit 2 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd77 : begin       //recieve bit 2 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd78 : begin       //recieve bit 2 
+                SCL <= 1'b1; 
+                SDAout[2] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd79 : begin       //recieve bit 2 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd80 : begin       //recieve bit 1 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd81 : begin       //recieve bit 1 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd82 : begin       //recieve bit 1 
+                SCL <= 1'b1; 
+                SDAout[1] <= SDA;
+                State <= State + 1'b1; 
+            end
+
+            10'd83 : begin       //recieve bit 1 
+                SCL <= 1'b0; 
+                State <= State + 1'b1; 
+            end
+
+            10'd84 : begin       //recieve bit 0 
+                SCL <= 1'b0; 
+                SDA <= 1'bz;
+                State <= State + 1'b1; 
+            end
+
+            10'd85 : begin       //recieve bit 0 
+                SCL <= 1'b1; 
+                State <= State + 1'b1; 
+            end
+
+            10'd86 : begin       //recieve bit 0 
+                SCL <= 1'b1; 
+                SDAout[0] <= SDA;
+                
+                State <= State + 1'b1; 
+            end
+
+            10'd87 : begin       //recieve bit 0 
+                SCL <= 1'b0; 
+                case(Counter) 
+                    8'd8 : read1 <= SDAout;
+                    8'd10 :  read2 <= SDAout;
+                    8'd12 :  read3 <= SDAout;
+                    8'd14 :  read4 <= SDAout;
+                    8'd16 :  read5 <= SDAout;
+                    8'd18 :  read6 <= SDAout;
+                    default : read6 <= SDAout;
+                endcase
+                Counter <= Counter + 1'b1;
+                State <= nstate; 
+            end
+            
+            10'd88 : begin 
+                if(PC_control[0] == 1'b0) begin
+                    State <= STATE_INIT; 
+                end
+            end
+
+            default : begin
+              error_bit <= 0;
+            end
+                    
+ 
+        endcase                           
+    end      
+    
+    
+    // OK Interface
+    wire [112:0]    okHE;  //These are FrontPanel wires needed to IO communication    
+    wire [64:0]     okEH;  //These are FrontPanel wires needed to IO communication 
+    
+    //This is the OK host that allows data to be sent or recived    
+    okHost hostIF (
+        .okUH(okUH),
+        .okHU(okHU),
+        .okUHU(okUHU),
+        .okClk(okClk),
+        .okAA(okAA),
+        .okHE(okHE),
+        .okEH(okEH)
+    );
+    localparam  endPt_count = 6;
+    wire [endPt_count*65-1:0] okEHx;  
+    okWireOR # (.N(endPt_count)) wireOR (okEH, okEHx);
+    //  PC_controll is a wire that contains data sent from the PC to FPGA.
+    //  The data is communicated via memeory location 0x00
+    okWireIn wire10 (   .okHE(okHE), 
+                        .ep_addr(8'h00), 
+                        .ep_dataout(PC_control));            
+    okWireIn wire11 (   .okHE(okHE), 
+                        .ep_addr(8'h01), 
+                        .ep_dataout(DeviceAd));      
+    okWireIn wire12 (   .okHE(okHE), 
+                        .ep_addr(8'h02), 
+                        .ep_dataout(SubAd));               
+    okWireIn wire13 (   .okHE(okHE), 
+                        .ep_addr(8'h03), 
+                        .ep_dataout(DataW));      
+    okWireIn wire14 (   .okHE(okHE), 
+                        .ep_addr(8'h04), 
+                        .ep_dataout(variable_1));
+    okWireIn wire15 (   .okHE(okHE), 
+                        .ep_addr(8'h05), 
+                        .ep_dataout(variable_2));
+    okWireIn wire16 (   .okHE(okHE), 
+                        .ep_addr(8'h06), 
+                        .ep_dataout(variable_3));
+    okWireIn wire17 (   .okHE(okHE), 
+                        .ep_addr(8'h07), 
+                        .ep_dataout(python_start));
+    okWireIn wire18 (   .okHE(okHE), 
+                        .ep_addr(8'h08), 
+                        .ep_dataout(Reset_Counter));         
+    okWireIn wire20 (   .okHE(okHE), 
+                        .ep_addr(8'h09), 
+                        .ep_dataout(MotorD));            
+    okWireIn wire21 (   .okHE(okHE), 
+                        .ep_addr(8'h10), 
+                        .ep_dataout(Pulses));
+    okWireIn wire22 (   .okHE(okHE), 
+                        .ep_addr(8'h11), 
+                        .ep_dataout(DutyCyc));                              
+      // result_wire is transmited to the PC via address 0x20   
+    okWireOut wire23 (  .okHE(okHE), 
+                        .okEH(okEHx[ 0*65 +: 65 ]), 
+                        .ep_addr(8'h20), 
+                        .ep_datain(out1));
+                            
+    // temp is transmited to the PC via address 0x21                         
+    okWireOut wire24 (  .okHE(okHE), 
+                        .okEH(okEHx[ 1*65 +: 65 ]),
+                        .ep_addr(8'h21), 
+                        .ep_datain(out2));   
+        // temp is transmited to the PC via address 0x21                         
+    okWireOut wire25 (  .okHE(okHE), 
+                        .okEH(okEHx[ 2*65 +: 65 ]),
+                        .ep_addr(8'h22), 
+                        .ep_datain(out3));   
+   //photo                 
+    okWireOut wire26 (  .okHE(okHE), 
+                        .okEH(okEHx[ 3*65 +: 65 ]),
+                        .ep_addr(8'h23), 
+                        .ep_datain(result_wire));  
+    okWireOut wire27 (  .okHE(okHE), 
+                        .okEH(okEHx[ 4*65 +: 65 ]),
+                        .ep_addr(8'h24), 
+                        .ep_datain(variable_4));  
+                        
+    wire fiforeaden, fifobtblockfull, btstrobe;
+    assign FIFO_read_enable = fiforeaden;
+    assign fifobtblockfull = FIFO_BT_BlockSize_Full;  
+    okBTPipeOut CounterToPC (
+        .okHE(okHE), 
+        .okEH(okEHx[ 5*65 +: 65 ]),
+        .ep_addr(8'ha0), 
+        .ep_datain(FIFO_data),  //input 32
+        .ep_read(fiforeaden), //output 1
+        .ep_blockstrobe(btstrobe), //input 1
+        .ep_ready(fifobtblockfull) //output 1
+    );                        
+                                     
+endmodule
